@@ -140,6 +140,73 @@ export class GoogleClassroomService {
     }
   }
 
+  async syncContentBatch(courseId: string, items: Array<{ content: any; contentType: 'assignment' | 'material' | 'announcement' }>) {
+    const results = [];
+
+    for (const [index, item] of items.entries()) {
+      try {
+        const result = await this.syncContentToClassroom(courseId, item.content, item.contentType);
+        results.push({ index, success: true, result });
+      } catch (error) {
+        results.push({
+          index,
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to sync item'
+        });
+      }
+    }
+
+    return results;
+  }
+
+  async getCourseWork(courseId: string) {
+    try {
+      const response = await this.classroom.courses.courseWork.list({
+        courseId,
+        courseWorkStates: ['PUBLISHED', 'DRAFT']
+      });
+      return response.data.courseWork || [];
+    } catch (error) {
+      console.error('Error fetching course work:', error);
+      throw new Error('Failed to fetch Google Classroom course work');
+    }
+  }
+
+  async getCourseAnalytics(courseId: string) {
+    const [students, courseWork] = await Promise.all([
+      this.getCourseStudents(courseId),
+      this.getCourseWork(courseId)
+    ]);
+    const submissions = await Promise.all(
+      courseWork.map((work: any) => this.getSubmissions(courseId, work.id))
+    );
+    const flattenedSubmissions = submissions.flat();
+    const gradedSubmissions = flattenedSubmissions.filter(
+      (submission: any) => typeof submission.assignedGrade === 'number'
+    );
+    const totalPoints = gradedSubmissions.reduce(
+      (sum: number, submission: any) => sum + submission.assignedGrade,
+      0
+    );
+
+    return {
+      courseId,
+      studentCount: students.length,
+      courseWorkCount: courseWork.length,
+      submissionCount: flattenedSubmissions.length,
+      gradedSubmissionCount: gradedSubmissions.length,
+      averageGrade: gradedSubmissions.length ? totalPoints / gradedSubmissions.length : null,
+      coursework: courseWork.map((work: any, index: number) => ({
+        id: work.id,
+        title: work.title,
+        submissionCount: submissions[index].length,
+        gradedSubmissionCount: submissions[index].filter(
+          (submission: any) => typeof submission.assignedGrade === 'number'
+        ).length
+      }))
+    };
+  }
+
   // Grade a submission
   async gradeSubmission(courseId: string, courseWorkId: string, submissionId: string, grade: number) {
     try {

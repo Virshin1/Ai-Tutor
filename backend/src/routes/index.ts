@@ -21,6 +21,36 @@ console.log('ROUTES FILE LOADED');
 
 const router = Router();
 
+const csvEscape = (value: unknown) => {
+  const text = value === undefined || value === null ? '' : String(value);
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+const parseCsvLine = (line: string) => {
+  const values: string[] = [];
+  let value = '';
+  let quoted = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    const nextCharacter = line[index + 1];
+    if (character === '"' && quoted && nextCharacter === '"') {
+      value += '"';
+      index += 1;
+    } else if (character === '"') {
+      quoted = !quoted;
+    } else if (character === ',' && !quoted) {
+      values.push(value.trim());
+      value = '';
+    } else {
+      value += character;
+    }
+  }
+
+  values.push(value.trim());
+  return values;
+};
+
 router.delete('/documents/:id', async (req, res) => {
   const { id } = req.params;
   console.log('INSIDE DELETE ROUTE', id);
@@ -871,6 +901,29 @@ router.post('/google-classroom/sync', async (req, res) => {
   }
 });
 
+router.post('/google-classroom/sync-bulk', async (req, res) => {
+  try {
+    const { accessToken, courseId, items } = req.body;
+    if (!accessToken || !courseId || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'accessToken, courseId, and a non-empty items array are required' });
+    }
+
+    const invalidItem = items.find(
+      (item: any) => !item.content || !['assignment', 'material', 'announcement'].includes(item.contentType)
+    );
+    if (invalidItem) {
+      return res.status(400).json({ error: 'Each item must include content and a valid contentType' });
+    }
+
+    const classroomService = new GoogleClassroomService();
+    await classroomService.initialize(accessToken);
+    const results = await classroomService.syncContentBatch(courseId, items);
+    res.json({ results, succeeded: results.filter(item => item.success).length, failed: results.filter(item => !item.success).length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to bulk sync content to Google Classroom' });
+  }
+});
+
 router.post('/google-classroom/create-assignment', async (req, res) => {
   try {
     const { accessToken, courseId, assignmentData } = req.body;
@@ -958,6 +1011,120 @@ router.post('/google-classroom/grade-submission', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to grade submission' });
+  }
+});
+
+router.get('/google-classroom/courses/:courseId/assignments/:assignmentId/grades.csv', async (req, res) => {
+  try {
+    const { accessToken } = req.query;
+    const { courseId, assignmentId } = req.params;
+    if (!accessToken) {
+      return res.status(400).json({ error: 'Access token required' });
+    }
+
+    const classroomService = new GoogleClassroomService();
+    await classroomService.initialize(accessToken as string);
+    const submissions = await classroomService.getSubmissions(courseId, assignmentId);
+    const headers = ['submissionId', 'userId', 'state', 'assignedGrade', 'draftGrade', 'updateTime'];
+    const rows = submissions.map((submission: any) => [
+      submission.id,
+      submission.userId,
+      submission.state,
+      submission.assignedGrade,
+      submission.draftGrade,
+      submission.updateTime
+    ].map(csvEscape).join(','));
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="grades-${assignmentId}.csv"`);
+    res.send([headers.join(','), ...rows].join('\n'));
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to export grades' });
+  }
+});
+
+router.post('/google-classroom/grades/import', async (req, res) => {
+  try {
+    const { accessToken, courseId, courseWorkId, grades, csv } = req.body;
+    if (!accessToken || !courseId || !courseWorkId || (!Array.isArray(grades) && typeof csv !== 'string')) {
+      return res.status(400).json({ error: 'accessToken, courseId, courseWorkId, and grades or csv are required' });
+    }
+
+    const parsedGrades = Array.isArray(grades)
+      ? grades
+      : csv.trim().split(/\r?\n/).slice(1).filter(Boolean).map((line: string) => {
+        const [submissionId, , , assignedGrade] = parseCsvLine(line);
+        return { submissionId, grade: Number(assignedGrade) };
+      });
+    const invalidGrade = parsedGrades.find(
+      (item: any) => !item.submissionId || typeof item.grade !== 'number' || !Number.isFinite(item.grade)
+    );
+    if (invalidGrade) {
+      return res.status(400).json({ error: 'Each grade must include a numeric grade and submissionId' });
+    }
+
+    const classroomService = new GoogleClassroomService();
+    await classroomService.initialize(accessToken);
+    const results = [];
+    for (const item of parsedGrades) {
+      try {
+        const result = await classroomService.gradeSubmission(courseId, courseWorkId, item.submissionId, item.grade);
+        results.push({ submissionId: item.submissionId, success: true, result });
+      } catch (error) {
+        results.push({ submissionId: item.submissionId, success: false, error: error instanceof Error ? error.message : 'Failed to grade submission' });
+      }
+    }
+    res.json({ results, succeeded: results.filter(item => item.success).length, failed: results.filter(item => !item.success).length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to import grades' });
+  }
+});
+
+router.post('/google-classroom/templates/:templateId/sync', async (req, res) => {
+  try {
+    const { accessToken, courseId, contentType } = req.body;
+    const { templateId } = req.params;
+    if (!accessToken || !courseId) {
+      return res.status(400).json({ error: 'accessToken and courseId are required' });
+    }
+
+    const template = await Template.findById(templateId);
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    const templateContentType = contentType || (template.type === 'assignment' ? 'assignment' : 'material');
+    if (!['assignment', 'material', 'announcement'].includes(templateContentType)) {
+      return res.status(400).json({ error: 'Template sync requires assignment, material, or announcement contentType' });
+    }
+
+    const content = {
+      ...template.content,
+      title: template.content?.title || template.name,
+      description: template.content?.description || template.description
+    };
+    const classroomService = new GoogleClassroomService();
+    await classroomService.initialize(accessToken);
+    const result = await classroomService.syncContentToClassroom(courseId, content, templateContentType);
+    res.json({ message: 'Template synced to Google Classroom successfully', result });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to sync template to Google Classroom' });
+  }
+});
+
+router.get('/google-classroom/courses/:courseId/analytics', async (req, res) => {
+  try {
+    const { accessToken } = req.query;
+    const { courseId } = req.params;
+    if (!accessToken) {
+      return res.status(400).json({ error: 'Access token required' });
+    }
+
+    const classroomService = new GoogleClassroomService();
+    await classroomService.initialize(accessToken as string);
+    const analytics = await classroomService.getCourseAnalytics(courseId);
+    res.json(analytics);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch Google Classroom analytics' });
   }
 });
 

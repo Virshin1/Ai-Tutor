@@ -58,12 +58,19 @@ VITE_GOOGLE_REDIRECT_URI=http://localhost:5173/auth/google/callback
 
 ### Content Sync
 - `POST /google-classroom/sync` - Sync content to Google Classroom
+- `POST /google-classroom/sync-bulk` - Sync multiple content items to a course
 - `POST /google-classroom/create-assignment` - Create assignment
 - `POST /google-classroom/create-material` - Create material
+- `POST /google-classroom/templates/{templateId}/sync` - Sync a saved template
 
 ### Submissions & Grading
 - `GET /google-classroom/courses/{courseId}/assignments/{assignmentId}/submissions` - Get submissions
 - `POST /google-classroom/grade-submission` - Grade a submission
+- `GET /google-classroom/courses/{courseId}/assignments/{assignmentId}/grades.csv` - Export grades as CSV
+- `POST /google-classroom/grades/import` - Import grades from JSON or CSV
+
+### Analytics
+- `GET /google-classroom/courses/{courseId}/analytics` - Get course, coursework, submission, and average-grade metrics
 
 ## 📱 Usage
 
@@ -144,12 +151,12 @@ DEBUG=google-classroom:*
 - [x] Error handling and validation
 
 ### 🚧 Future Enhancements
-- [ ] Bulk content sync
-- [ ] Grade import/export
+- [x] Bulk content sync
+- [x] Grade import/export
 - [ ] Real-time notifications
-- [ ] Template sync
+- [x] Template sync
 - [ ] Advanced scheduling
-- [ ] Analytics integration
+- [x] Analytics integration
 
 ## 🎯 Best Practices
 
